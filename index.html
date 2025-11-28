@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台灣垃圾車即時動態</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- PapaParse for CSV -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #888; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555; 
+        }
+        
+        .leaflet-div-icon {
+            background: transparent;
+            border: none;
+        }
+    </style>
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        day: {
+                            bg: '#f3f4f6',
+                            card: '#ffffff',
+                            text: '#1f2937'
+                        },
+                        night: {
+                            bg: '#111827',
+                            card: '#1f2937',
+                            text: '#f3f4f6'
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="transition-colors duration-500">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- Configuration Data ---
+        const CITIES = [
+            { id: 'keelung', name: '基隆市', lat: 25.1276, lng: 121.7392, type: 'csv', url: 'https://opendata-kl.askeycloud.com/route_klepb.csv' },
+            { id: 'taipei', name: '臺北市', lat: 25.0330, lng: 121.5654, type: 'csv', url: 'https://data.taipei/api/dataset/6bb3304b-4f46-4bb0-8cd1-60c66dcd1cae/resource/a6e90031-7ec4-4089-afb5-361a4efe7202/download' },
+            { id: 'new_taipei', name: '新北市', lat: 25.0170, lng: 121.4625, type: 'csv', url: 'https://data.ntpc.gov.tw/api/datasets/edc3ad26-8ae7-4916-a00b-bc6048d19bf8/csv/file' },
+            { id: 'taichung', name: '臺中市', lat: 24.1477, lng: 120.6736, type: 'json', url: 'https://datacenter.taichung.gov.tw/swagger/OpenData/c923ad20-2ec6-43b9-b3ab-54527e99f7bc' },
+            { id: 'changhua', name: '彰化市', lat: 24.0518, lng: 120.5461, type: 'web', url: 'https://hwms.moenv.gov.tw/dispPageBox/route/routeCP.aspx?ddsPageID=LINEINFO&dbid=6591326671' }, 
+            { id: 'tainan', name: '臺南市', lat: 22.9997, lng: 120.2270, type: 'csv', url: 'https://www.tnepb.gov.tw/opendata/TrashCarPositions.csv' },
+            { id: 'kaohsiung', name: '高雄市', lat: 22.6273, lng: 120.3014, type: 'json', url: 'https://openapi.kcg.gov.tw/Api/Service/Get/14fe516d-ac62-4905-9325-70daae7616bd' },
+            { id: 'yilan', name: '宜蘭縣', lat: 24.7021, lng: 121.7377, type: 'json', url: 'https://opendata.ilepb.gov.tw/ILEPB04004?media=file' },
+        ];
+
+        // --- Icons ---
+        const TruckIcon = ({ color }) => (
+            <div className={`text-2xl ${color} drop-shadow-md`}>
+                <i className="fa-solid fa-truck-field"></i>
+            </div>
+        );
+
+        // --- Mock Data Generator ---
+        const generateMockTrucks = (city, count = 10) => {
+            const trucks = [];
+            for (let i = 0; i < count; i++) {
+                trucks.push({
+                    id: `mock-${i}`,
+                    plate: `GPS-${1000 + i}`,
+                    location: `模擬路線 ${i+1}號`,
+                    lat: city.lat + (Math.random() - 0.5) * 0.05,
+                    lng: city.lng + (Math.random() - 0.5) * 0.05,
+                    angle: Math.random() * 360
+                });
+            }
+            return trucks;
+        };
+
+        const moveMockTrucks = (trucks) => {
+            return trucks.map(t => ({
+                ...t,
+                lat: t.lat + (Math.random() - 0.5) * 0.001,
+                lng: t.lng + (Math.random() - 0.5) * 0.001
+            }));
+        };
+
+        // --- Main Component ---
+        const App = () => {
+            const [darkMode, setDarkMode] = useState(false);
+            const [selectedCity, setSelectedCity] = useState(null);
+            const [trucks, setTrucks] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [useRealData, setUseRealData] = useState(false);
+            const [activeTruckId, setActiveTruckId] = useState(null);
+            
+            // Map refs
+            const mapRef = useRef(null);
+            const mapInstanceRef = useRef(null);
+            const markersRef = useRef({});
+            const tileLayerRef = useRef(null);
+
+            // Time check for theme
+            useEffect(() => {
+                const checkTime = () => {
+                    const hour = new Date().getHours();
+                    const isNight = hour < 6 || hour >= 18;
+                    setDarkMode(isNight);
+                };
+                checkTime();
+                const interval = setInterval(checkTime, 60000); // Check every minute
+                return () => clearInterval(interval);
+            }, []);
+
+            // Apply theme class to body
+            useEffect(() => {
+                if (darkMode) {
+                    document.documentElement.classList.add('dark');
+                } else {
+                    document.documentElement.classList.remove('dark');
+                }
+                
+                // Update Map Tiles if map exists
+                if (mapInstanceRef.current && tileLayerRef.current) {
+                    const tileUrl = darkMode 
+                        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+                    tileLayerRef.current.setUrl(tileUrl);
+                }
+
+            }, [darkMode]);
+
+            // Simulation Loop
+            useEffect(() => {
+                if (!selectedCity || useRealData) return;
+
+                const interval = setInterval(() => {
+                    setTrucks(prev => moveMockTrucks(prev));
+                }, 2000);
+
+                return () => clearInterval(interval);
+            }, [selectedCity, useRealData]);
+
+            // Initialize Map
+            useEffect(() => {
+                if (selectedCity && !mapInstanceRef.current) {
+                    // Create Map
+                    mapInstanceRef.current = L.map('map-container').setView([selectedCity.lat, selectedCity.lng], 13);
+
+                    // Add Tile Layer
+                    const tileUrl = darkMode 
+                        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                        : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+                    
+                    tileLayerRef.current = L.tileLayer(tileUrl, {
+                        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+                        subdomains: 'abcd',
+                        maxZoom: 19
+                    }).addTo(mapInstanceRef.current);
+                }
+
+                // Cleanup map on city deselect
+                if (!selectedCity && mapInstanceRef.current) {
+                    mapInstanceRef.current.remove();
+                    mapInstanceRef.current = null;
+                    markersRef.current = {};
+                }
+            }, [selectedCity]);
+
+            // Update Markers
+            useEffect(() => {
+                if (!mapInstanceRef.current) return;
+
+                const map = mapInstanceRef.current;
+                const currentMarkers = markersRef.current;
+                const newIds = new Set(trucks.map(t => t.id));
+
+                // Remove old markers
+                Object.keys(currentMarkers).forEach(id => {
+                    if (!newIds.has(id)) {
+                        map.removeLayer(currentMarkers[id]);
+                        delete currentMarkers[id];
+                    }
+                });
+
+                // Add/Update markers
+                trucks.forEach(truck => {
+                    const iconHtml = `<div style="font-size: 24px; color: ${truck.id === activeTruckId ? '#e11d48' : '#10b981'}; text-shadow: 0 2px 4px rgba(0,0,0,0.3);"><i class="fa-solid fa-truck-field"></i></div>`;
+                    
+                    const customIcon = L.divIcon({
+                        html: iconHtml,
+                        className: 'leaflet-div-icon',
+                        iconSize: [30, 30],
+                        iconAnchor: [15, 15]
+                    });
+
+                    if (currentMarkers[truck.id]) {
+                        currentMarkers[truck.id].setLatLng([truck.lat, truck.lng]);
+                        currentMarkers[truck.id].setIcon(customIcon);
+                    } else {
+                        const marker = L.marker([truck.lat, truck.lng], { icon: customIcon })
+                            .addTo(map)
+                            .bindPopup(`<b>${truck.plate}</b><br>${truck.location}`);
+                        
+                        marker.on('click', () => {
+                            setActiveTruckId(truck.id);
+                        });
+                        
+                        currentMarkers[truck.id] = marker;
+                    }
+                });
+
+                // Pan to active truck
+                if (activeTruckId) {
+                    const activeTruck = trucks.find(t => t.id === activeTruckId);
+                    if (activeTruck) {
+                        map.setView([activeTruck.lat, activeTruck.lng], 15);
+                    }
+                }
+
+            }, [trucks, activeTruckId, darkMode]);
+
+
+            // Fetch Data Function
+            const fetchData = async (city) => {
+                setLoading(true);
+                setTrucks([]);
+                setActiveTruckId(null);
+
+                if (!useRealData) {
+                    // Mock Data
+                    setTimeout(() => {
+                        setTrucks(generateMockTrucks(city));
+                        setLoading(false);
+                    }, 800);
+                    return;
+                }
+
+                // Real Data Fetching (Demo Logic - usually blocked by CORS in browser)
+                try {
+                    // Note: This block handles fetching. In a real production app without a proxy server,
+                    // most of these will fail due to CORS. 
+                    if (city.type === 'csv') {
+                        Papa.parse(city.url, {
+                            download: true,
+                            header: true,
+                            complete: (results) => {
+                                // Generic parser attempting to find lat/lng columns
+                                const parsed = results.data.map((row, idx) => {
+                                    const lat = parseFloat(row.Lat || row.Latitude || row.Y || row.y);
+                                    const lng = parseFloat(row.Lng || row.Longitude || row.X || row.x);
+                                    if (isNaN(lat) || isNaN(lng)) return null;
+                                    return {
+                                        id: row.CarNo || row.car_no || `id-${idx}`,
+                                        plate: row.CarNo || row.car_no || '未知車號',
+                                        location: row.Location || '行駛中',
+                                        lat, lng
+                                    };
+                                }).filter(Boolean);
+                                setTrucks(parsed);
+                                setLoading(false);
+                            },
+                            error: (err) => {
+                                alert("CORS 限制: 無法直接從瀏覽器讀取該政府 CSV。已切換回模擬模式。");
+                                setUseRealData(false);
+                                setTrucks(generateMockTrucks(city));
+                                setLoading(false);
+                            }
+                        });
+                    } else if (city.type === 'json') {
+                        const res = await fetch(city.url);
+                        const data = await res.json();
+                        // Need specific parsing logic per city JSON structure
+                        // Fallback for demo
+                        alert("API 連線成功，但需針對該城市 JSON 結構撰寫解析邏輯。切換回模擬模式。");
+                         setUseRealData(false);
+                        setTrucks(generateMockTrucks(city));
+                        setLoading(false);
+                    } else {
+                        alert("此城市資料格式為網頁，無法直接串接 API。");
+                        setUseRealData(false);
+                        setTrucks(generateMockTrucks(city));
+                        setLoading(false);
+                    }
+                } catch (e) {
+                    console.error(e);
+                    alert("無法連線至開放資料 API (可能因 CORS 跨域限制)。建議使用模擬模式預覽功能。");
+                    setUseRealData(false);
+                    setTrucks(generateMockTrucks(city));
+                    setLoading(false);
+                }
+            };
+
+            const handleCitySelect = (city) => {
+                setSelectedCity(city);
+                fetchData(city);
+            };
+
+            const handleBack = () => {
+                setSelectedCity(null);
+                setTrucks([]);
+            };
+
+            // --- Render ---
+            return (
+                <div className={`min-h-screen flex flex-col ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-900'}`}>
+                    
+                    {/* Header */}
+                    <header className={`p-4 shadow-md flex justify-between items-center z-20 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+                        <div className="flex items-center gap-3">
+                            {selectedCity && (
+                                <button onClick={handleBack} className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition">
+                                    <i className="fa-solid fa-arrow-left"></i>
+                                </button>
+                            )}
+                            <h1 className="text-xl font-bold tracking-wider">
+                                <i className="fa-solid fa-trash-can mr-2 text-green-500"></i>
+                                {selectedCity ? `${selectedCity.name}垃圾車動態` : '城市選擇'}
+                            </h1>
+                        </div>
+                        
+                        <div className="flex items-center gap-4">
+                            <button 
+                                onClick={() => setDarkMode(!darkMode)}
+                                className={`px-4 py-2 rounded-full font-medium transition duration-300 flex items-center gap-2 ${darkMode ? 'bg-yellow-400 text-gray-900' : 'bg-gray-800 text-white'}`}
+                            >
+                                <i className={`fa-solid ${darkMode ? 'fa-sun' : 'fa-moon'}`}></i>
+                                {darkMode ? '早安' : '晚安'}
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="flex-1 relative overflow-hidden flex flex-col">
+                        
+                        {!selectedCity ? (
+                            // City Selection Grid
+                            <div className="container mx-auto p-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6 animate-fade-in">
+                                {CITIES.map(city => (
+                                    <button 
+                                        key={city.id}
+                                        onClick={() => handleCitySelect(city)}
+                                        className={`group relative p-6 rounded-xl shadow-lg transition transform hover:-translate-y-1 hover:shadow-2xl text-left border overflow-hidden
+                                            ${darkMode ? 'bg-gray-800 border-gray-700 hover:bg-gray-750' : 'bg-white border-gray-100 hover:bg-blue-50'}
+                                        `}
+                                    >
+                                        <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:opacity-20 transition">
+                                            <i className="fa-solid fa-map-location-dot text-6xl"></i>
+                                        </div>
+                                        <h2 className="text-2xl font-bold mb-2">{city.name}</h2>
+                                        <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                                            點擊查看即時路徑
+                                        </p>
+                                        <div className="mt-4 flex items-center text-xs font-mono opacity-50">
+                                            <span className="bg-green-100 text-green-800 px-2 py-1 rounded dark:bg-green-900 dark:text-green-100">
+                                                {city.type.toUpperCase()}
+                                            </span>
+                                        </div>
+                                    </button>
+                                ))}
+                                
+                                <div className={`mt-8 col-span-full text-center p-4 rounded-lg text-sm
+                                    ${darkMode ? 'bg-gray-800 text-gray-400' : 'bg-white text-gray-500'}
+                                `}>
+                                    <p><i className="fa-solid fa-circle-info mr-1"></i> 資料來源：各縣市政府開放資料平台 (Open Data)</p>
+                                </div>
+                            </div>
+                        ) : (
+                            // Map Interface
+                            <div className="flex flex-col h-full relative">
+                                {/* Top Controls for Map */}
+                                <div className={`absolute top-4 left-1/2 transform -translate-x-1/2 z-[1000] px-4 py-2 rounded-full shadow-lg flex items-center gap-2 text-sm
+                                     ${darkMode ? 'bg-gray-800/90 text-white' : 'bg-white/90 text-gray-800'} backdrop-blur-sm`}>
+                                    <span className="font-bold">模式：</span>
+                                    <button 
+                                        onClick={() => { setUseRealData(false); fetchData(selectedCity); }}
+                                        className={`px-3 py-1 rounded-full transition ${!useRealData ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                                    >
+                                        模擬演示
+                                    </button>
+                                    <button 
+                                        onClick={() => { setUseRealData(true); fetchData(selectedCity); }}
+                                        className={`px-3 py-1 rounded-full transition ${useRealData ? 'bg-green-500 text-white' : 'hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                                    >
+                                        真實資料 (CORS)
+                                    </button>
+                                </div>
+
+                                {/* Map Container */}
+                                <div id="map-container" className="flex-1 w-full h-full z-10"></div>
+                                
+                                {/* Loading Overlay */}
+                                {loading && (
+                                    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                                        <div className="text-white text-center">
+                                            <i className="fa-solid fa-circle-notch fa-spin text-4xl mb-2"></i>
+                                            <p>載入中...</p>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Bottom Sheet / Truck List */}
+                                <div className={`absolute bottom-4 left-4 right-4 md:left-auto md:right-4 md:top-20 md:bottom-auto md:w-80 z-[1000] rounded-xl shadow-2xl max-h-[40vh] md:max-h-[80vh] overflow-hidden flex flex-col
+                                    ${darkMode ? 'bg-gray-800/95 border border-gray-700' : 'bg-white/95 border border-gray-200'} backdrop-blur-md transition-all`}>
+                                    
+                                    <div className={`p-3 border-b font-bold flex justify-between items-center ${darkMode ? 'border-gray-700' : 'border-gray-100'}`}>
+                                        <span>附近車輛 ({trucks.length})</span>
+                                        {useRealData && <span className="text-xs text-red-500 border border-red-500 px-1 rounded">LIVE</span>}
+                                        {!useRealData && <span className="text-xs text-blue-500 border border-blue-500 px-1 rounded">SIM</span>}
+                                    </div>
+
+                                    <div className="overflow-y-auto p-2 space-y-2 flex-1">
+                                        {trucks.length === 0 && !loading && (
+                                            <div className="text-center py-4 text-gray-500 text-sm">
+                                                目前沒有車輛資訊
+                                            </div>
+                                        )}
+                                        {trucks.map(truck => (
+                                            <button 
+                                                key={truck.id}
+                                                onClick={() => setActiveTruckId(truck.id)}
+                                                className={`w-full text-left p-3 rounded-lg transition flex items-center gap-3
+                                                    ${activeTruckId === truck.id 
+                                                        ? 'bg-green-500 text-white shadow-lg scale-[1.02]' 
+                                                        : (darkMode ? 'hover:bg-gray-700 bg-gray-750' : 'hover:bg-gray-50 bg-white border border-gray-100')
+                                                    }
+                                                `}
+                                            >
+                                                <div className={`p-2 rounded-full ${activeTruckId === truck.id ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-900'}`}>
+                                                    <i className="fa-solid fa-truck text-sm"></i>
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="font-bold truncate">{truck.plate}</div>
+                                                    <div className={`text-xs truncate ${activeTruckId === truck.id ? 'text-green-100' : 'text-gray-500 dark:text-gray-400'}`}>
+                                                        {truck.location}
+                                                    </div>
+                                                </div>
+                                                {activeTruckId === truck.id && <i className="fa-solid fa-location-dot animate-bounce"></i>}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
